@@ -72,11 +72,17 @@ Install FFmpeg using your distribution’s package manager:
     `cd audiobook-combiner`
 
 
-4. Make the Script Executable (Optional):
+3. Run the install script:
+
+    `./install.sh`
+
+    This makes `combine_audio` executable and symlinks it into `~/bin/`. Ensure `~/bin` is in your `PATH` (the script will remind you if not).
+
+4. Make the Script Executable (Optional, if not using install.sh):
 
     On Unix-based systems:
 
-    `chmod +x combine_audio.py`
+    `chmod +x combine_audio`
 
 
 
@@ -84,11 +90,11 @@ Install FFmpeg using your distribution’s package manager:
 
 ### Basic Command
 
-`python combine_audio.py --combine`
+`combine_audio --combine`
 
-Or, if the script is executable:
+Or, if running directly from the repo:
 
-`./combine_audio.py --combine`
+`./combine_audio --combine`
 
 ### Command-Line Options
 
@@ -105,15 +111,26 @@ Or, if the script is executable:
 
 ## Preparing Your Audio Files
 
-- Naming Convention: Name your audiobook part files in the format Book Name (1).mp3, Book Name (2).mp3, etc.
-- Supported Formats: Input files can be in .mp3 or .m4a format.
-- Directory: Place all part files in the same directory as the script.
+- Supported Formats: Input files can be in `.mp3`, `.m4a`, or `.aax` format.
+- Directory: Place all part files in the directory you will run the script from (your current working directory).
+
+### Supported Naming Conventions
+
+The script auto-detects which format your files use. Three formats are supported:
+
+| Format | Example | Notes |
+|--------|---------|-------|
+| Leading number | `01 - Moby Dick - Chapter 1.mp3` | Chapter titles inferred from filenames |
+| Trailing number | `The Adventures of Tom Sawyer - 001.mp3` | Chapters auto-numbered |
+| Parenthesized number | `Pride and Prejudice (1).mp3` | Chapters auto-numbered |
+
+Run the script from the directory containing your files. It will detect the book name and file order automatically.
 
 ### Examples
 
 #### Combine Files with Default Settings
 
-`python combine_audio.py --combine`
+`combine_audio --combine`
 
 - Default Behavior:
   - Uses CBR encoding.
@@ -122,19 +139,19 @@ Or, if the script is executable:
 
 #### Combine Files Using VBR Encoding
 
-`python combine_audio.py --combine --vbr`
+`combine_audio --combine --vbr`
 
 - Default VBR Quality: Estimated based on the input file’s bitrate.
 
 #### Combine Files with Specific VBR Quality
 
-`python combine_audio.py --combine --vbr --quality 2`
+`combine_audio --combine --vbr --quality 2`
 
 - VBR Quality Level: Sets the quality to level 2 (0=best, 5=worst).
 
 #### Combine Files with Specific CBR Bitrate
 
-`python combine_audio.py --combine --bitrate 64k`
+`combine_audio --combine --bitrate 64k`
 
 - CBR Bitrate: Sets the bitrate to 64 kbps.
 
@@ -150,7 +167,7 @@ Or, if the script is executable:
 
 2.	Run the Script:
 
-`python combine_audio.py --combine --chapter-titles-file chapter_titles.txt`
+`combine_audio --combine --chapter-titles-file chapter_titles.txt`
 
 - Note: The number of chapter titles must match the number of input files.
 
@@ -160,17 +177,17 @@ You can specify the output sample rate using the `--sample-rate` flag. Common sa
 
 **Example:**
 
-`python combine_audio.py --combine --sample-rate 22050`
+`combine_audio --combine --sample-rate 22050`
 
 #### Perform a Dry Run
 
-`python combine_audio.py --combine --dry-run`
+`combine_audio --combine --dry-run`
 
 - Dry Run: Simulates the combination process without creating or modifying files.
 
 #### Clean Up Part Files After Combining
 
-`python combine_audio.py --clean`
+`combine_audio --clean`
 
  - Clean Up: Deletes the original part files if the final .m4b file exists.
 

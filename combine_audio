@@ -1,37 +1,134 @@
 #!/usr/bin/env python3
-# Version 4.6
+# Version 4.7
 
 import os
+import sys
 import argparse
 import subprocess
 from glob import glob
 import json
 from decimal import Decimal, getcontext
 
+verbose = False
+
+def vprint(*args, **kwargs):
+    if verbose:
+        print(*args, **kwargs)
+
+def select_option(prompt, options, default=0):
+    """Arrow-key selection menu. Falls back to numbered input if stdin is not a tty."""
+    if not sys.stdin.isatty():
+        print(prompt)
+        for i, opt in enumerate(options):
+            print(f"  {i + 1}. {opt}{' (default)' if i == default else ''}")
+        raw = input(f"Choice [1-{len(options)}]: ").strip()
+        return (int(raw) - 1) if raw.isdigit() and 1 <= int(raw) <= len(options) else default
+
+    try:
+        import termios, tty
+    except ImportError:
+        # Windows: fall back to numbered input
+        print(prompt)
+        for i, opt in enumerate(options):
+            print(f"  {i + 1}. {opt}{' (default)' if i == default else ''}")
+        raw = input(f"Choice [1-{len(options)}]: ").strip()
+        return (int(raw) - 1) if raw.isdigit() and 1 <= int(raw) <= len(options) else default
+
+    selected = default
+
+    def render():
+        for i, opt in enumerate(options):
+            prefix = "\033[1m>\033[0m" if i == selected else " "
+            sys.stdout.write(f"  {prefix} {opt}\033[K\r\n")
+        sys.stdout.flush()
+
+    print(prompt)
+    render()
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                seq = sys.stdin.read(2)
+                if seq == '[A' and selected > 0:
+                    selected -= 1
+                elif seq == '[B' and selected < len(options) - 1:
+                    selected += 1
+            elif ch in ('\r', '\n'):
+                break
+            elif ch == '\x03':
+                raise KeyboardInterrupt
+            sys.stdout.write(f"\033[{len(options)}A")
+            render()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    print()
+    return selected
+
 def infer_book_name_and_extension():
-    print("Inferring book name and extensions...")
+    vprint("Inferring book name and extensions...")
+    # Try dash format first: "NN - Book Title - Chapter Description.ext"
+    dash_files = (glob("[0-9][0-9] - *.mp3") + glob("[0-9][0-9] - *.m4a") + glob("[0-9][0-9] - *.aax"))
+    if dash_files:
+        sorted_dash = sorted(dash_files, key=lambda x: int(x.split(" - ")[0]))
+        book_name = sorted_dash[0].split(" - ")[1]
+        inferred_titles = []
+        for f in sorted_dash:
+            parts = f.split(" - ", maxsplit=2)
+            title = os.path.splitext(parts[2])[0] if len(parts) == 3 else f"Chapter {parts[0]}"
+            inferred_titles.append(title)
+        print(f"Book: '{book_name}'")
+        return book_name, sorted_dash, inferred_titles
+    # Try trailing-number format: "Book Title - NNN.ext"
+    candidates = glob("* - *.mp3") + glob("* - *.m4a") + glob("* - *.aax")
+    trailing_files = [
+        f for f in candidates
+        if os.path.splitext(f)[0].rsplit(" - ", 1)[-1].isdigit()
+    ]
+    if trailing_files:
+        sorted_trailing = sorted(trailing_files, key=lambda x: int(os.path.splitext(x)[0].rsplit(" - ", 1)[-1]))
+        book_name = os.path.splitext(sorted_trailing[0])[0].rsplit(" - ", 1)[0]
+        print(f"Book: '{book_name}'")
+        return book_name, sorted_trailing, None
+    # Fall back to parens format: "Book Name (N).ext"
     files = glob("*(*).mp3") + glob("*(*).m4a") + glob("*(*).aax")
     if not files:
         print("No part files found in the directory.")
-        return None, None
-    first_file = files[0]
-    book_name = first_file.split("(")[0].strip()
-    print(f"Book name inferred: '{book_name}'")
-    return book_name, files
+        return None, None, None
+    book_name = files[0].split("(")[0].strip()
+    print(f"Book: '{book_name}'")
+    return book_name, files, None
 
-def get_files(book_name, files):
-    print("Gathering list of part files...")
-    book_files = [f for f in files if f.startswith(book_name)]
-    try:
-        sorted_files = sorted(book_files, key=lambda x: int(x.split("(")[-1].split(")")[0]))
-    except ValueError as e:
-        print(f"Error sorting files: {e}")
-        return []
-    print(f"Found {len(sorted_files)} part files.")
+def get_files(book_name, files, fmt="parens"):
+    vprint("Gathering list of part files...")
+    if fmt == "dash":
+        try:
+            sorted_files = sorted(files, key=lambda x: int(x.split(" - ")[0]))
+        except ValueError as e:
+            print(f"Error sorting files: {e}")
+            return []
+    elif fmt == "trailing":
+        try:
+            sorted_files = sorted(files, key=lambda x: int(os.path.splitext(x)[0].rsplit(" - ", 1)[-1]))
+        except ValueError as e:
+            print(f"Error sorting files: {e}")
+            return []
+    else:
+        book_files = [f for f in files if f.startswith(book_name)]
+        try:
+            sorted_files = sorted(book_files, key=lambda x: int(x.split("(")[-1].split(")")[0]))
+        except ValueError as e:
+            print(f"Error sorting files: {e}")
+            return []
+    vprint(f"Found {len(sorted_files)} part files.")
     return sorted_files
 
 def get_audio_bitrate(file_path):
-    print(f"Getting audio bitrate from '{file_path}'...")
+    vprint(f"Getting audio bitrate from '{file_path}'...")
     command = [
         "ffprobe",
         "-v", "quiet",
@@ -43,15 +140,14 @@ def get_audio_bitrate(file_path):
     bitrate_str = result.stdout.decode().strip()
     if bitrate_str and bitrate_str.isdigit():
         bitrate = int(bitrate_str)
-        print(f"Input file bitrate: {bitrate} bps")
+        vprint(f"Input file bitrate: {bitrate} bps")
         return bitrate
     else:
-        print("Could not determine input file bitrate.")
+        vprint("Could not determine input file bitrate.")
         return None
 
 def map_bitrate_to_quality(bitrate):
     # Map input bitrate to approximate VBR quality level
-    # This is an estimation; adjust the mapping as needed
     if bitrate >= 256000:
         return 0  # Best quality
     elif bitrate >= 192000:
@@ -65,10 +161,8 @@ def map_bitrate_to_quality(bitrate):
     else:
         return 5  # Lowest quality
 
-
 def map_bitrate_to_cbr(bitrate):
     # Map input bitrate to approximate CBR bitrate
-    # This is an estimation; adjust the mapping as needed
     if bitrate >= 256000:
         return "256k"
     elif bitrate >= 192000:
@@ -85,7 +179,7 @@ def map_bitrate_to_cbr(bitrate):
         return "96k"  # default
 
 def get_common_metadata(file_paths):
-    print("Collecting metadata from all input files...")
+    vprint("Collecting metadata from all input files...")
     metadata_list = []
     for file_path in file_paths:
         command = [
@@ -113,13 +207,13 @@ def get_common_metadata(file_paths):
     # Adjust 'track' metadata to '1'
     if 'track' in common_metadata:
         common_metadata['track'] = '1'
-    print("Common metadata entries:")
+    vprint("Common metadata entries:")
     for key, value in common_metadata.items():
-        print(f"  {key}: {value}")
+        vprint(f"  {key}: {value}")
     return common_metadata
 
 def extract_cover_image(file_path):
-    print(f"Extracting cover image from '{file_path}' (if any)...")
+    vprint(f"Extracting cover image from '{file_path}' (if any)...")
     command = [
         "ffmpeg",
         "-y",
@@ -130,16 +224,16 @@ def extract_cover_image(file_path):
     ]
     subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if os.path.exists("_temp_cover.jpg") and os.path.getsize("_temp_cover.jpg") > 0:
-        print("Cover image extracted successfully.")
+        vprint("Cover image extracted successfully.")
         return "_temp_cover.jpg"
     else:
         if os.path.exists("_temp_cover.jpg"):
             os.unlink("_temp_cover.jpg")
-        print("No cover image found or extraction failed.")
+        vprint("No cover image found or extraction failed.")
     return None
 
 def generate_chapter_metadata(offsets, chapter_threshold, common_metadata, chapter_titles=None, chapter_file="_temp_chapters_metadata.txt"):
-    print("Generating chapter metadata...")
+    vprint("Generating chapter metadata...")
     with open(chapter_file, "w", encoding='utf-8') as f:
         f.write(";FFMETADATA1\n")
         # Write common metadata entries
@@ -166,11 +260,11 @@ def generate_chapter_metadata(offsets, chapter_threshold, common_metadata, chapt
             else:
                 title = f"{chapter_label} {index + 1}"
             f.write(f"TITLE={title}\n")
-            print(f"Added chapter '{title}': START={chapter_start_ms} ms")
+            vprint(f"Added chapter '{title}': START={chapter_start_ms} ms")
 
-def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=None, sample_rate=None, chapter_threshold=6, chapter_titles=None, dry_run=False):
-    print("Starting combination process...")
-    part_files = get_files(book_name, files)
+def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=None, sample_rate=None, chapter_threshold=6, chapter_titles=None, fmt="parens", dry_run=False):
+    vprint("Starting combination process...")
+    part_files = get_files(book_name, files, fmt=fmt)
     if not part_files:
         print(f"No files found for '{book_name}'.")
         return False
@@ -186,6 +280,17 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
         return False
 
     output_file = f"{book_name}.m4b"
+    if os.path.exists(output_file):
+        print(f"Error: '{output_file}' already exists. Remove it before combining.")
+        return False
+
+    # Show plan and confirm
+    print(f"Will combine {len(part_files)} files into '{output_file}':")
+    for i, file in enumerate(part_files, 1):
+        print(f"  {i}. {file}")
+    if select_option("Proceed?", [f"Yes", "No"], default=0) != 0:
+        print("Aborted.")
+        return False
 
     # Extract cover image if available
     cover_image = extract_cover_image(part_files[0])
@@ -195,17 +300,17 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
 
     if vbr:
         if vbr_quality is not None:
-            print(f"Using user-specified VBR quality level: {vbr_quality}")
+            vprint(f"Using user-specified VBR quality level: {vbr_quality}")
         else:
             vbr_quality = map_bitrate_to_quality(input_bitrate)
-            print(f"Estimated VBR quality level: {vbr_quality} based on input bitrate of {input_bitrate if input_bitrate else 'unknown'}.")
+            vprint(f"Estimated VBR quality level: {vbr_quality} based on input bitrate of {input_bitrate if input_bitrate else 'unknown'}.")
         bitrate_option = ["-q:a", str(vbr_quality)]
     else:
         if cbr_bitrate is not None:
-            print(f"Using user-specified CBR bitrate: {cbr_bitrate}")
+            vprint(f"Using user-specified CBR bitrate: {cbr_bitrate}")
         else:
             cbr_bitrate = map_bitrate_to_cbr(input_bitrate)
-            print(f"Estimated CBR bitrate: {cbr_bitrate} based on input bitrate of {input_bitrate if input_bitrate else 'unknown'}.")
+            vprint(f"Estimated CBR bitrate: {cbr_bitrate} based on input bitrate of {input_bitrate if input_bitrate else 'unknown'}.")
         bitrate_option = ["-b:a", cbr_bitrate]
 
     # If sample_rate is specified, add it to the encoding options
@@ -213,12 +318,15 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
         if sample_rate <= 0:
             print(f"Invalid sample rate specified: {sample_rate}. It must be a positive integer.")
             return False
-        print(f"Setting output sample rate to: {sample_rate} Hz")
+        vprint(f"Setting output sample rate to: {sample_rate} Hz")
         sample_rate_option = ["-ar", str(sample_rate)]
     else:
         sample_rate_option = []
 
+    ff_output = {} if verbose else {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+
     # Re-encode each file individually to ensure consistent format and get accurate durations
+    total = len(part_files)
     temp_files = []
     for index, input_file in enumerate(part_files):
         temp_file = f"_temp_{index}.m4b"
@@ -231,10 +339,10 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
             "-ac", "1",  # Enforce mono output
         ]
         command.extend(bitrate_option)
-        command.extend(sample_rate_option)  # Add sample rate if specified
+        command.extend(sample_rate_option)
         command.append(temp_file)
-        print(f"Re-encoding '{input_file}' to '{temp_file}'...")
-        subprocess.run(command, check=True)
+        print(f"Processing file {index + 1}/{total}: {input_file}")
+        subprocess.run(command, check=True, **ff_output)
         temp_files.append(temp_file)
 
     # Create file list for concat demuxer
@@ -270,12 +378,11 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
 
     # Add output file
     command.append(output_file)
-    print(f"Final ffmpeg command: {' '.join(command)}")
+    vprint(f"Final ffmpeg command: {' '.join(command)}")
 
     try:
-        print(f"Combining files into '{output_file}'...")
-        subprocess.run(command, check=True)
-        print(f"Successfully created '{output_file}'")
+        print(f"Combining into '{output_file}'...")
+        subprocess.run(command, check=True, **ff_output)
 
         # Remove the file list
         os.remove(file_list_path)
@@ -320,9 +427,9 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
             "-c", "copy",
             temp_output_file
         ]
-        print(f"Final command for adding chapters and metadata: {' '.join(final_command)}")
-        subprocess.run(final_command, check=True)
-        print(f"Successfully added chapters and metadata.")
+        vprint(f"Final command for adding chapters and metadata: {' '.join(final_command)}")
+        print("Adding chapters and metadata...")
+        subprocess.run(final_command, check=True, **ff_output)
 
         # Replace the original file with the new file
         os.replace(temp_output_file, output_file)
@@ -331,26 +438,40 @@ def combine_files(book_name, files, vbr=False, vbr_quality=None, cbr_bitrate=Non
         os.remove("_temp_chapters_metadata.txt")
         if cover_image and os.path.exists(cover_image):
             os.unlink(cover_image)
+
         # Calculate and display size ratio
         input_size = sum(os.path.getsize(f) for f in part_files)
         output_size = os.path.getsize(output_file)
         if output_size > 0:
             size_ratio = input_size / output_size
-            print(f"Total input size: {input_size} bytes")
-            print(f"Output file size: {output_size} bytes")
-            print(f"Size ratio (input/output): {size_ratio:.2f}")
+            print(f"Done. Output: '{output_file}' ({output_size // 1024 // 1024} MB, ratio {size_ratio:.2f}x)")
         else:
-            print("Output file size is zero. Cannot compute size ratio.")
+            print(f"Done. Output: '{output_file}' (size unknown)")
+
+        # Ask what to do with source files
+        source_folder = f"{book_name} - source files"
+        print()
+        choice = select_option(
+            f"What would you like to do with the {len(part_files)} source files?",
+            ["Do nothing", f"Move into folder '{source_folder}'"],
+            default=0
+        )
+        if choice == 1:
+            os.makedirs(source_folder, exist_ok=True)
+            for f in part_files:
+                os.rename(f, os.path.join(source_folder, os.path.basename(f)))
+            print(f"Moved {len(part_files)} files into '{source_folder}'.")
+
         return True
     except subprocess.CalledProcessError as e:
         print(f"Failed to combine files into '{output_file}'. Error: {e}")
         return False
 
-def clean_files(book_name, files, dry_run=False):
+def clean_files(book_name, files, fmt="parens", dry_run=False):
     print("Starting cleanup process...")
     output_file = f"{book_name}.m4b"
     if os.path.exists(output_file):
-        part_files = get_files(book_name, files)
+        part_files = get_files(book_name, files, fmt=fmt)
         if dry_run:
             print(f"[Dry Run] Would delete the following part files for '{book_name}':")
             for file in part_files:
@@ -368,7 +489,7 @@ def clean_files(book_name, files, dry_run=False):
         print(f"Cannot clean. '{output_file}' does not exist.")
 
 def read_chapter_titles(chapter_titles_file):
-    print(f"Reading chapter titles from '{chapter_titles_file}'...")
+    vprint(f"Reading chapter titles from '{chapter_titles_file}'...")
     chapter_titles = []
     try:
         with open(chapter_titles_file, 'r', encoding='utf-8') as f:
@@ -391,15 +512,17 @@ def read_chapter_titles(chapter_titles_file):
     except Exception as e:
         print(f"Error reading chapter titles file '{chapter_titles_file}': {e}")
         return None
-    print(f"Read {len(chapter_titles)} chapter titles.")
+    vprint(f"Read {len(chapter_titles)} chapter titles.")
     return chapter_titles
 
 def main():
-    print("Audio Book Combiner Script - Version 4.5")
+    global verbose
+    print("Audio Book Combiner Script - Version 4.7")
     parser = argparse.ArgumentParser(description="Combine and clean audio book parts.")
     parser.add_argument("--combine", action="store_true", help="Combine the parts into a single m4b file")
     parser.add_argument("--clean", action="store_true", help="Clean up part files if the final m4b exists")
     parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without making any changes")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed output including ffmpeg logs")
     parser.add_argument("--vbr", action="store_true", help="Use VBR encoding")
     parser.add_argument("--quality", type=int, choices=range(0, 6), metavar="[0-5]", help="Set VBR quality level (0=best, 5=worst)")
     parser.add_argument("--bitrate", type=str, help="Set CBR bitrate (e.g., 64k, 96k)")
@@ -408,10 +531,19 @@ def main():
     parser.add_argument("--chapter-titles-file", type=str, help="Specify a file containing chapter titles, one per line.")
     args = parser.parse_args()
 
-    book_name, files = infer_book_name_and_extension()
+    verbose = args.verbose
+
+    book_name, files, inferred_titles = infer_book_name_and_extension()
     if not book_name or not files:
         print("Exiting due to missing book name or files.")
         return
+
+    if inferred_titles is not None:
+        fmt = "dash"
+    elif files and os.path.splitext(files[0])[0].rsplit(" - ", 1)[-1].isdigit():
+        fmt = "trailing"
+    else:
+        fmt = "parens"
 
     chapter_titles = None
     if args.chapter_titles_file:
@@ -419,6 +551,9 @@ def main():
         if chapter_titles is None:
             print("Exiting due to error reading chapter titles.")
             return
+    elif inferred_titles is not None:
+        chapter_titles = inferred_titles
+        vprint(f"Using {len(chapter_titles)} chapter titles inferred from filenames.")
 
     if args.combine:
         success = combine_files(
@@ -427,9 +562,10 @@ def main():
             vbr=args.vbr,
             vbr_quality=args.quality,
             cbr_bitrate=args.bitrate,
-            sample_rate=args.sample_rate,  # Pass sample rate to combine_files
+            sample_rate=args.sample_rate,
             chapter_threshold=args.chapter_threshold,
             chapter_titles=chapter_titles,
+            fmt=fmt,
             dry_run=args.dry_run
         )
         if not success and not args.dry_run:
@@ -437,7 +573,11 @@ def main():
             return
 
     if args.clean:
-        clean_files(book_name, files, dry_run=args.dry_run)
+        clean_files(book_name, files, fmt=fmt, dry_run=args.dry_run)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(1)
